@@ -6,20 +6,31 @@
 
 #define MAX_PROCESSES 100
 #define TIME_QUANTUM 4
+#define MAX_IO_OPERATIONS 5  // 최대 I/O 작업 횟수
+
+// I/O Operation Structure
+typedef struct {
+    int request_time;    // CPU 실행 시간 중 I/O 요청 시점
+    int burst_time;      // I/O 작업 시간
+} IOOperation;
 
 // Process Structure
 typedef struct {
     int pid;
     int arrival_time;
     int cpu_burst_time_initial;
-    int io_request_time;
-    int io_burst_time;
     int priority;
 
+    // Multiple I/O operations
+    IOOperation io_operations[MAX_IO_OPERATIONS];
+    int num_io_operations;
+    int current_io_index;  // 현재 진행 중인 I/O index
+    int total_io_time;
+
     // Dynamic fields for simulation
-    int remaining_cpu_total;
-    int cpu_done_current_segment;   // process가 실행되고 있을 때 
-    int remaining_cpu_after_io;
+    int remaining_cpu_total;        // 남아있는 CPU 시간간
+    int cpu_done_current_segment;   // process가 실행되고 있을 때 실행한 시간
+    int total_cpu_done;             // 전체 CPU 실행 시간
 
     int start_time;
     int completion_time;
@@ -59,7 +70,7 @@ typedef struct {
     int start;
     int end;
 } GanttEntry;
-GanttEntry gantt_chart[MAX_PROCESSES * 20];
+GanttEntry gantt_chart[MAX_PROCESSES * 50];
 int gantt_idx = 0;
 
 // Current scheduling mode for ready queue comparison
@@ -69,6 +80,12 @@ enum SchedulingMode {
     PRIORITY_MODE,
     RR_MODE
 } current_scheduling_mode;
+
+// Preemption mode
+enum PreemptionMode {
+    NON_PREEMPTIVE,
+    PREEMPTIVE
+} current_preemption_mode;
 
 // Comparison functions for different scheduling algorithms
 int compare_fcfs(Process* a, Process* b) {
@@ -124,7 +141,6 @@ void heap_swap(ProcessHeap* heap, int i, int j) {
     heap->heap[j] = temp;
 }
 
-// algorithm의 우선순위(FCFS-earlier arrival time)에 맞게 heap의 맨 끝부터 확인하며 내부 정렬 
 void heap_heapify_up(ProcessHeap* heap, int index) {
     if (index == 0) return;
     
@@ -135,7 +151,6 @@ void heap_heapify_up(ProcessHeap* heap, int index) {
     }
 }
 
-//가장 큰 수가 parent에 있을 때 아래로 내려가면서 작은 수로 정렬하는 방법
 void heap_heapify_down(ProcessHeap* heap, int index) {
     int left = 2 * index + 1;
     int right = 2 * index + 2;
@@ -154,7 +169,6 @@ void heap_heapify_down(ProcessHeap* heap, int index) {
     }
 }
 
-// heap 맨 끝에 process 삽입 후 정렬
 void heap_insert(ProcessHeap* heap, Process* process) {
     if (heap->size >= MAX_PROCESSES) return;
     
@@ -163,7 +177,6 @@ void heap_insert(ProcessHeap* heap, Process* process) {
     heap->size++;
 }
 
-//heap의 맨 끝 process를 root로 올리고 정렬하여 min 추출
 Process* heap_extract_min(ProcessHeap* heap) {
     if (heap->size == 0) return NULL;
     
@@ -242,25 +255,46 @@ void Create_Process() {
 
     srand(time(NULL));
     printf("\n--- Generating Random Processes ---\n");
-    printf("PID | Arrival | CPU Burst | I/O Request | I/O Burst | Priority\n");
-    printf("----|---------|-----------|-------------|-----------|---------\n");
+    printf("PID | Arrival | CPU Burst | Priority | I/O Operations\n");
+    printf("----|---------|-----------|----------|---------------\n");
 
     for (int i = 0; i < num_processes; i++) {
         original_processes[i].pid = i + 1;
         original_processes[i].arrival_time = rand() % 20;
-        original_processes[i].cpu_burst_time_initial = (rand() % 15) + 1;
-        original_processes[i].io_burst_time = (rand() % 10) + 1;
-        
-        if (original_processes[i].io_burst_time == 0)
-            original_processes[i].io_request_time = 0;
-        else
-            original_processes[i].io_request_time = (rand() % original_processes[i].cpu_burst_time_initial) + 1;
-
+        original_processes[i].cpu_burst_time_initial = (rand() % 20) + 5; // 5~24
         original_processes[i].priority = rand() % 10;
-        printf("%3d | %7d | %9d | %10d | %9d | %8d\n",
+        
+        // 여러 I/O 작업 생성 (0~4개)
+        original_processes[i].num_io_operations = (rand() % MAX_IO_OPERATIONS);
+        original_processes[i].current_io_index = 0;
+        original_processes[i].total_io_time = 0;
+        
+        printf("%3d | %7d | %9d | %8d | ",
                original_processes[i].pid, original_processes[i].arrival_time,
-               original_processes[i].cpu_burst_time_initial, original_processes[i].io_request_time,
-               original_processes[i].io_burst_time, original_processes[i].priority);
+               original_processes[i].cpu_burst_time_initial, original_processes[i].priority);
+        
+        if(original_processes[i].num_io_operations == 0){
+            printf("No I/O Operations");
+        }
+
+        for (int j = 0; j < original_processes[i].num_io_operations; j++) {
+            // I/O 요청 시점을 CPU 실행 시간 내에서 분산
+            int segment_size = original_processes[i].cpu_burst_time_initial / (original_processes[i].num_io_operations + 1);
+            original_processes[i].io_operations[j].request_time = segment_size * (j + 1) + (rand() % (segment_size / 2 + 1));
+            
+            // I/O 요청 시점이 CPU 실행 시간을 초과하지 않도록 조정
+            if (original_processes[i].io_operations[j].request_time >= original_processes[i].cpu_burst_time_initial) {
+            original_processes[i].io_operations[j].request_time = original_processes[i].cpu_burst_time_initial - 1;
+            }
+            
+            original_processes[i].io_operations[j].burst_time = (rand() % 8) + 2; // 2~9
+            original_processes[i].total_io_time += original_processes[i].io_operations[j].burst_time;
+            
+            printf("I/O.%d - [req: %d, burst: %d] ", j+1, 
+                   original_processes[i].io_operations[j].request_time,
+                   original_processes[i].io_operations[j].burst_time);
+        }
+        printf("\n");
     }
     
     printf("\n--- Processes Created Successfully ---\n");
@@ -269,10 +303,10 @@ void Create_Process() {
 void Config() {
     printf("\n--- System Configuration ---\n");
 
-    printf("\nReady Queue Configuration:\n");
+    printf("\n    Ready Queue Configuration\n");
     heap_init(&ready_queue, compare_fcfs); // Default initialization, will be reconfigured per algorithm
      
-    printf("\nWaiting Queue Configuration:\n");
+    printf("    Waiting Queue Configuration\n");
     heap_init(&waiting_queue, compare_io_completion);
     
     printf("\n--- Configuration Complete ---\n");
@@ -283,7 +317,8 @@ void reset_processes_for_simulation() {
         processes[i] = original_processes[i];
         processes[i].remaining_cpu_total = processes[i].cpu_burst_time_initial;
         processes[i].cpu_done_current_segment = 0;
-        processes[i].remaining_cpu_after_io = 0;
+        processes[i].total_cpu_done = 0;
+        processes[i].current_io_index = 0;
         processes[i].start_time = -1;
         processes[i].completion_time = 0;
         processes[i].waiting_time = 0;
@@ -304,14 +339,11 @@ void reset_processes_for_simulation() {
     gantt_idx = 0;
 }
 
-// gantt chart 작성
 void add_gantt_entry(int pid, int start, int end) {
-    // 이전과 같은 구간을 연속적으로 표현해야 할 때
     if (gantt_idx > 0 && gantt_chart[gantt_idx-1].pid == pid && gantt_chart[gantt_idx-1].end == start) {
         gantt_chart[gantt_idx-1].end = end;
     } 
-    // 새로운 pid 기록
-    else if (gantt_idx < MAX_PROCESSES * 20) {
+    else if (gantt_idx < MAX_PROCESSES * 50) {
         gantt_chart[gantt_idx].pid = pid;
         gantt_chart[gantt_idx].start = start;
         gantt_chart[gantt_idx].end = end;
@@ -327,7 +359,7 @@ void Evaluation(const char* algo_name) {
     printf("\n--- Evaluation for %s ---\n", algo_name);
 
     // Print Gantt Chart
-    printf("Gantt Chart:\n|");
+    printf("\nGantt Chart:\n|");
     for (int i = 0; i < gantt_idx; i++) {
         if (gantt_chart[i].start < gantt_chart[i].end) {
             printf(" P%d (%d-%d) |", gantt_chart[i].pid, gantt_chart[i].start, gantt_chart[i].end);
@@ -337,7 +369,7 @@ void Evaluation(const char* algo_name) {
 
     printf("\nProcess Details:\n");
     printf("PID | Arrival | Completion | Turnaround | Waiting | Response\n");
-    printf("----|---------|------------|------------|---------|----------\n");
+    printf("----|---------|------------|------------|---------|---------\n");
 
     for (int i = 0; i < num_processes; i++) {
         Process p_eval;
@@ -353,7 +385,7 @@ void Evaluation(const char* algo_name) {
 
         if (p_eval.state == 4) {
             p_eval.turnaround_time = p_eval.completion_time - p_eval.arrival_time;
-            p_eval.waiting_time = p_eval.turnaround_time - p_eval.cpu_burst_time_initial;
+            p_eval.waiting_time = p_eval.turnaround_time - p_eval.cpu_burst_time_initial - p_eval.total_io_time;
             if (p_eval.waiting_time < 0) p_eval.waiting_time = 0;
 
             printf("%3d | %7d | %10d | %10d | %7d | %8d\n",
@@ -376,41 +408,41 @@ void Evaluation(const char* algo_name) {
 }
 
 int simulate_process_tick(Process* p, int current_time) {
-    // 1) cpu usuage update
+    // 1) CPU 사용량 업데이트
     p->remaining_cpu_total--;
     p->cpu_done_current_segment++;
+    p->total_cpu_done++;
 
-    // 2. Check if reach to I/O request time
-    int is_first_cpu_segment = (p->remaining_cpu_after_io == 0);
-    if (is_first_cpu_segment &&
-        p->io_request_time > 0 &&
-        p->io_burst_time > 0 &&
-        p->cpu_done_current_segment == p->io_request_time &&
-        p->io_request_time < p->cpu_burst_time_initial) {
-
-        p->state = 3;
-        p->io_complete_at_time = current_time + 1 + p->io_burst_time;
-        p->remaining_cpu_after_io = p->cpu_burst_time_initial - p->io_request_time;
-        p->remaining_cpu_total = p->remaining_cpu_after_io;
-
-        heap_insert(&waiting_queue, p);
-        return 1;
+    // 2. 다음 I/O 요청 시점인지 확인
+    if (p->current_io_index < p->num_io_operations) {
+        IOOperation* next_io = &p->io_operations[p->current_io_index];
+        
+        if (p->total_cpu_done == next_io->request_time) {
+            // I/O 작업 시작
+            p->state = 3;
+            p->io_complete_at_time = current_time + 1 + next_io->burst_time;
+            p->current_io_index++; // 다음 I/O 작업으로 이동
+            
+            heap_insert(&waiting_queue, p);
+            return 1; // I/O로 전환
+        }
     }
 
-    // Check if process's burst time is done
+    // 3. 프로세스의 모든 CPU 작업이 완료되었는지 확인
     if (p->remaining_cpu_total == 0) {
         p->state = 4;
         p->completion_time = current_time + 1;
-        return 2;
+        return 2; // 완료
     }
-    return 0;
+    
+    return 0; // 계속 실행
 }
 
-void run_scheduler_generic(const char* algo_name, enum SchedulingMode mode) {
+void run_scheduler_generic(const char* algo_name, enum SchedulingMode mode, enum PreemptionMode preemption_mode) {
     reset_processes_for_simulation();
     current_scheduling_mode = mode;
+    current_preemption_mode = preemption_mode;
     
-    // Reconfigure ready queue with appropriate comparison function
     switch (mode) {
         case FCFS_MODE:
             ready_queue.compare = compare_fcfs;
@@ -426,7 +458,13 @@ void run_scheduler_generic(const char* algo_name, enum SchedulingMode mode) {
             break;
     }
 
-    printf("\n--- Running %s Scheduler ---\n", algo_name);
+    printf("\n--- Running");
+    if (preemption_mode == NON_PREEMPTIVE && mode != RR_MODE && mode != FCFS_MODE) {
+        printf(" Non-Preemptive");
+    } else if (preemption_mode == PREEMPTIVE && mode != RR_MODE && mode != FCFS_MODE) {
+        printf(" Preemptive");
+    }
+    printf(" %s Scheduler ------\n", algo_name);
 
     int current_time = 0;
     int completed_count = 0;
@@ -447,9 +485,7 @@ void run_scheduler_generic(const char* algo_name, enum SchedulingMode mode) {
         // 2. Check for I/O completions using waiting queue
         while (waiting_queue.size != 0) {
             Process* p_waiting = waiting_queue.heap[0];
-            // I/O가 끝난 상태라면
             if (p_waiting->io_complete_at_time <= current_time) {
-                // heap에서 꺼내서
                 Process* p = heap_extract_min(&waiting_queue);
                 
                 // Update the actual process and add to ready queue
@@ -468,15 +504,15 @@ void run_scheduler_generic(const char* algo_name, enum SchedulingMode mode) {
             }
         }
 
-        // 3. Preemption logic for preemptive algorithms
-        if (running_process != NULL && ready_queue.size != 0) {
+        // 3. Preemption logic ONLY for preemptive algorithms
+        if (running_process != NULL && ready_queue.size != 0 && preemption_mode == PREEMPTIVE) {
             Process* potential_preemptor = ready_queue.heap[0];
             int should_preempt = 0;
 
-            if (strstr(algo_name, "Preemptive SJF") &&
+            if (mode == SJF_MODE &&
                 potential_preemptor->remaining_cpu_total < running_process->remaining_cpu_total) {
                 should_preempt = 1;
-            } else if (strstr(algo_name, "Preemptive Priority") &&
+            } else if (mode == PRIORITY_MODE &&
                        potential_preemptor->priority < running_process->priority) {
                 should_preempt = 1;
             }
@@ -535,17 +571,17 @@ void run_scheduler_generic(const char* algo_name, enum SchedulingMode mode) {
         }
 
         current_time++;
-        // 실행 안되는 문제 발생하여 강제 종료
-        if (current_time > 5000 && completed_count < num_processes) {
+        
+        // 무한 루프 방지
+        if (current_time > 10000 && completed_count < num_processes) {
             printf("Simulation for %s possibly stuck. Time: %d, Completed: %d/%d\n", 
                    algo_name, current_time, completed_count, num_processes);
             break;
         }
-        // 모든 실행 완료
+        
         if (completed_count == num_processes && running_process == NULL && 
             ready_queue.size == 0 && waiting_queue.size == 0) break;
         
-        // 아직 process 도착 전인데, ready queue 내 모든 process 실행 완료
         if (completed_count < num_processes && running_process == NULL && 
             ready_queue.size == 0) {
             // Advance time to next event if CPU idle
@@ -555,14 +591,14 @@ void run_scheduler_generic(const char* algo_name, enum SchedulingMode mode) {
                     next_event_time = processes[i].arrival_time;
                 }
             }
-            // I/O waiting 존재 시
+            
             if (waiting_queue.size != 0) {
-                Process* next_io = waiting_queue.size == 0 ? NULL : waiting_queue.heap[0];
+                Process* next_io = waiting_queue.heap[0];
                 if (next_io->io_complete_at_time < next_event_time) {
                     next_event_time = next_io->io_complete_at_time;
                 }
             }
-            // 아직 process 도착 전
+            
             if (next_event_time != INT_MAX && next_event_time > current_time) {
                 add_gantt_entry(0, current_time, next_event_time);
                 current_time = next_event_time;
@@ -577,27 +613,27 @@ void run_scheduler_generic(const char* algo_name, enum SchedulingMode mode) {
 
 // Specific Schedulers
 void Schedule_FCFS() {
-    run_scheduler_generic("FCFS", FCFS_MODE);
+    run_scheduler_generic("FCFS", FCFS_MODE, NON_PREEMPTIVE);
 }
 
 void Schedule_SJF_NonPreemptive() {
-    run_scheduler_generic("Non-Preemptive SJF", SJF_MODE);
+    run_scheduler_generic("SJF", SJF_MODE, NON_PREEMPTIVE);
 }
 
 void Schedule_SJF_Preemptive() {
-    run_scheduler_generic("Preemptive SJF", SJF_MODE);
+    run_scheduler_generic("SJF", SJF_MODE, PREEMPTIVE);
 }
 
 void Schedule_Priority_NonPreemptive() {
-    run_scheduler_generic("Non-Preemptive Priority", PRIORITY_MODE);
+    run_scheduler_generic("Priority", PRIORITY_MODE, NON_PREEMPTIVE);
 }
 
 void Schedule_Priority_Preemptive() {
-    run_scheduler_generic("Preemptive Priority", PRIORITY_MODE);
+    run_scheduler_generic("Priority", PRIORITY_MODE, PREEMPTIVE);
 }
 
 void Schedule_RR() {
-    run_scheduler_generic("Round Robin", RR_MODE);
+    run_scheduler_generic("Round Robin", RR_MODE, NON_PREEMPTIVE);
 }
 
 int main() {
