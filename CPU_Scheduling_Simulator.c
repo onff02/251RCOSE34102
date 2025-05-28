@@ -25,7 +25,6 @@ typedef struct {
     IOOperation io_operations[MAX_IO_OPERATIONS];
     int num_io_operations;
     int current_io_index;  // 현재 진행 중인 I/O index
-    int total_io_time;
 
     // Dynamic fields for simulation
     int remaining_cpu_total;        // 남아있는 CPU 시간간
@@ -42,7 +41,7 @@ typedef struct {
     // State: 0: not_arrived, 1: ready, 2: running, 3: waiting_io, 4: completed
     int state;
     int io_complete_at_time;
-    int has_started_execution;
+    int has_started_execution;      // CPU에 할당 받았었는지 여부 확인
     int current_quantum_slice;
     
     // For heap ordering in different contexts
@@ -267,7 +266,6 @@ void Create_Process() {
         // 여러 I/O 작업 생성 (0~4개)
         original_processes[i].num_io_operations = (rand() % MAX_IO_OPERATIONS);
         original_processes[i].current_io_index = 0;
-        original_processes[i].total_io_time = 0;
         
         printf("%3d | %7d | %9d | %8d | ",
                original_processes[i].pid, original_processes[i].arrival_time,
@@ -288,7 +286,6 @@ void Create_Process() {
             }
             
             original_processes[i].io_operations[j].burst_time = (rand() % 8) + 2; // 2~9
-            original_processes[i].total_io_time += original_processes[i].io_operations[j].burst_time;
             
             printf("I/O.%d - [req: %d, burst: %d] ", j+1, 
                    original_processes[i].io_operations[j].request_time,
@@ -385,7 +382,6 @@ void Evaluation(const char* algo_name) {
 
         if (p_eval.state == 4) {
             p_eval.turnaround_time = p_eval.completion_time - p_eval.arrival_time;
-            p_eval.waiting_time = p_eval.turnaround_time - p_eval.cpu_burst_time_initial - p_eval.total_io_time;
             if (p_eval.waiting_time < 0) p_eval.waiting_time = 0;
 
             printf("%3d | %7d | %10d | %10d | %7d | %8d\n",
@@ -492,9 +488,9 @@ void run_scheduler_generic(const char* algo_name, enum SchedulingMode mode, enum
                 for (int k = 0; k < num_processes; ++k) {
                     if (processes[k].pid == p->pid) {
                         processes[k].state = 1;
-                        processes[k].last_active_time = current_time;
+                        processes[k].last_active_time = current_time;   //waiting time 계산 위해서 ready queue 입장 시간 기록
                         processes[k].cpu_done_current_segment = 0;
-                        processes[k].queue_entry_time = current_time;
+                        processes[k].queue_entry_time = current_time;   // RR에서 FIFO 순서를 위해서 queue 입장 시간 기록
                         heap_insert(&ready_queue, &processes[k]);
                         break;
                     }
@@ -518,7 +514,7 @@ void run_scheduler_generic(const char* algo_name, enum SchedulingMode mode, enum
             }
 
             if (should_preempt) {
-                add_gantt_entry(running_process->pid, current_process_start_cpu_time, current_time);
+                add_gantt_entry(running_process->pid, current_process_start_cpu_time, current_time);    // 기존 process gantt에 기록
                 running_process->state = 1;
                 running_process->last_active_time = current_time;
                 running_process->current_quantum_slice = 0;
